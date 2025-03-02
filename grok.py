@@ -5,6 +5,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 
+# Set random seeds for reproducibility
+torch.manual_seed(17) 
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(17)
+np.random.seed(10)
+
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -41,7 +47,7 @@ train_labels = train_full_labels[:train_subset_size]
 
 # Define the Transformer model
 class GrokTransformer(nn.Module):
-    def __init__(self, mod, d_model=128, nhead=4, num_layers=2, init_orthogonal=False):
+    def __init__(self, mod, d_model=128, nhead=4, num_layers=2):
         super(GrokTransformer, self).__init__()
         self.mod = mod
         self.d_model = d_model
@@ -52,8 +58,6 @@ class GrokTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.fc = nn.Linear(d_model, mod)
-        if init_orthogonal:
-            nn.init.orthogonal_(self.fc.weight)
 
     def forward(self, a, b):
         batch_size = a.size(0)
@@ -107,7 +111,6 @@ def train_model(model, train_pairs, train_labels, val_pairs, val_labels, cfg):
             loss = stable_cross_entropy(logits, targets_batch, cfg.get("use_stablemax", False))
             loss.backward()
 
-            # Apply method-specific modifications
             if cfg.get("use_ma", False) or cfg.get("use_ema", False) or cfg.get("use_perpgrad", False):
                 for name, param in model.named_parameters():
                     if param.grad is None:
@@ -130,7 +133,6 @@ def train_model(model, train_pairs, train_labels, val_pairs, val_labels, cfg):
             optimizer.step()
             total_loss += loss.item()
 
-        # Evaluate after each epoch
         model.eval()
         with torch.no_grad():
             train_logits = model(train_pairs[:, 0].to(device), train_pairs[:, 1].to(device))
@@ -144,13 +146,11 @@ def train_model(model, train_pairs, train_labels, val_pairs, val_labels, cfg):
         if epoch % 100 == 0:
             print(f"Epoch {epoch}, Method: {cfg['name']}, Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}")
 
-        # Check stopping condition: stop if both train and val accuracies are >= 99%
         if train_acc >= 0.99 and val_acc >= 0.99:
             print(f"Stopping early at epoch {epoch} as both train and val accuracy reached 99%!")
             break
 
     return history
-
 
 # Method configurations
 methods_cfg = {
@@ -161,22 +161,26 @@ methods_cfg = {
                      "use_ema": True, "alpha": 0.98, "lamb": 2.0},
     "StableMax_Regular": {"name": "StableMax_Regular", "lr": 1e-3, "wd": 1e-3, "batch_size": 128,
                           "use_stablemax": True},
-    "StableMax_Orthogonal": {"name": "StableMax_Orthogonal", "lr": 1e-3, "wd": 1e-3, "batch_size": 128,
-                             "use_stablemax": True, "init_orthogonal": True},
     "StableMax_Perpendicular": {"name": "StableMax_Perpendicular", "lr": 1e-3, "wd": 1e-3, "batch_size": 128,
                                 "use_stablemax": True, "use_perpgrad": True}
 }
 
-# Run experiments
+# Run experiments with parameter printing
 results = {}
 for method_name, cfg in methods_cfg.items():
     print(f"\nRunning {method_name}")
+    print(f"Parameters: Learning Rate = {cfg['lr']}, Weight Decay = {cfg['wd']}, Batch Size = {cfg['batch_size']}")
+    if 'ma_window' in cfg:
+        print(f"Grokfast_MA Window Size = {cfg['ma_window']}, Lambda = {cfg['ma_lambda']}")
+    if 'alpha' in cfg:
+        print(f"Grokfast_EMA Alpha = {cfg['alpha']}, Lambda = {cfg['lamb']}")
+    print(f"Training Subset Size = {train_subset_size}, Percent of Full Train Set = {global_cfg['train_subset_frac']*100:.1f}%")
+    
     model = GrokTransformer(
         mod=global_cfg["mod"],
         d_model=128,
         nhead=4,
-        num_layers=2,
-        init_orthogonal=cfg.get("init_orthogonal", False)
+        num_layers=2
     ).to(device)
     history = train_model(model, train_pairs, train_labels, val_pairs, val_labels, cfg)
     results[method_name] = history
@@ -191,4 +195,3 @@ plt.title("Validation Accuracy Over Time")
 plt.legend()
 plt.grid(True)
 plt.show()
-
